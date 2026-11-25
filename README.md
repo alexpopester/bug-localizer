@@ -1,42 +1,55 @@
-# CS6640 Final Project: Using GraphCodeBERT Embeddings To Enhance an Agentless Pipeline’s Ability to localize bugs in Python Github Projects
-This project includes the agenless code, the added api bindings for gemini and a local model, the semantic similarity calculations via GraphCodeBERT and a couple of runner scripts.
+# Bug Localizer: GraphCodeBERT ranking for LLM bug fixing
 
-### 0. Before running anything
-- create a python virtual environment "python -m venv .venv"
-- activate the virtual environment "source .venv/bin/activate"
-- install the dependencies "pip install -r requirements.txt"
+Takes a GitHub issue and finds the functions in a Python codebase that most likely need changing. It does this by fine-tuning GraphCodeBERT to match bug reports to code and adding that ranking step to the [Agentless](https://github.com/OpenAutoCoder/Agentless) bug-fixing pipeline.
 
-### 1.To get the fine tuned model (Preferred for better results):
-- Download it here [https://drive.google.com/file/d/1B9X52hsL7xnTmj-Ale8w2pCVWGxjDUhR/view?usp=sharing](https://drive.google.com/file/d/1B9X52hsL7xnTmj-Ale8w2pCVWGxjDUhR/view?usp=sharing)
-- Unzip .zip file in the main "Agentless" repository
+![Localization results on SWE-bench Lite](benchmark_comparison_v2_gemini.png)
 
-### 1.(alternate to avoid downloading model) To use the base Graph CodeBERT (Preferred for faster testing of repo):
-- Don't have the fine tuned model in your repo.
+## What I built
 
-### 2. To run the Semantic similarity on one instance do the following (Fastest but only one example):
-- Open "run_semantic_scoring_alone.sh"
-- Point the "in_dir" variable to a folder containing localization results. The "in_dir" var should point to the directory that contains folders like "file_level", "file_level_combined" etc. A pre-generated set of these can be downloaded here: [https://github.com/OpenAutoCoder/Agentless/releases/download/v1.5.0/agentless_swebench_lite.zip](https://github.com/OpenAutoCoder/Agentless/releases/download/v1.5.0/agentless_swebench_lite.zip)
-- Verify the out_dir and out_file variables are to your preference
-- Run the script.
-- Inspect the generated embeddings at the "embeddings" folder and inspect the semantic similarity at your "out_dir/out_file"
+Agentless fixes GitHub issues in three phases: localize the bug, generate patches, then validate them. Localization is where it most often fails. If the right function is never found, no patch can be correct. This project replaces the LLM-only localization with a learned semantic ranking:
 
-### 2.(full dataset) To run Semantic similarity on entire dataset (Slower but provides larger data sample):
-- Modify "run_semantic_scoring_alone.sh" and use the all instances section instead.
-- Point the PROJECT_FILE_LOC variable to the location of the downloaded swe-bench-lite repo. This is not necessary but avoids downloading the data set dynamically which saves a lot of time. It is 3.5 GB. Download it here: [https://drive.usercontent.google.com/download?id=15-4XjTmY48ystrsc_xcvtOkMs3Fx8RoW&export=download&authuser=0&confirm=t&uuid=927974f7-294c-45ab-b5ce-dd8dd816aba2&at=ALWLOp55XuTjV6RIYrtvNMwuAzhl%3A1763766440739](https://drive.usercontent.google.com/download?id=15-4XjTmY48ystrsc_xcvtOkMs3Fx8RoW&export=download&authuser=0&confirm=t&uuid=927974f7-294c-45ab-b5ce-dd8dd816aba2&at=ALWLOp55XuTjV6RIYrtvNMwuAzhl%3A1763766440739)
-- Point the "in_dir" variable to a folder containing "Agentless" localization results. A pre-generated set of these can be downloaded here: [https://github.com/OpenAutoCoder/Agentless/releases/download/v1.5.0/agentless_swebench_lite.zip](https://github.com/OpenAutoCoder/Agentless/releases/download/v1.5.0/agentless_swebench_lite.zip)
-- verify the out_dir and out_file variables are to your preference
-- Run the script.
-- Inspect the generated embeddings at the "embeddings" folder and inspect the semantic similarity at your "out_dir/out_file"
+- **Fine-tuned retriever** (`classification/train_localizer.py`): fine-tunes `microsoft/graphcodebert-base` with sentence-transformers on (issue, fixed function, unrelated function) triplets built from the SWE-bench *train* split.
+- **Semantic scoring** (`agentless/fl/semantic_scoring.py`): parses each repository with Python's `ast`, embeds every function, and ranks them by cosine similarity to the issue text.
+- **More model backends** (`agentless/util/model.py`): adds Gemini, a local OpenAI-compatible server, and llama.cpp to the existing OpenAI, Anthropic, and DeepSeek clients.
+- **Evaluation** (`classification/*_results.py`, `visualize_logs.py`): Hit@k, precision, recall, and F1 against the gold patches.
 
-## Not required to test embeddings. Only run if you want to generate your own prompts
-#### To run the full localization with semantic scoring run:
-- Set the google API key for the prompts. If a different model and binding is wanted you will need to edit the arguments in the "full_workflow/localization..." scripts.
-- Point the PROJECT_FILE_LOC variable to the location of the downloaded swe-bench-lite repo. This is not necessary but avoids downloading the data set dynamically which saves a lot of time
-- Set your RESULTS_FOLDER to define where the prompts and jsonl files should be generated
-- Run the script. Be aware of the api limits if using chatgpt, anthropic or gemini
+## Results
 
+Evaluated on all 300 SWE-bench Lite issues (function-level localization):
 
-# Original Project README below for reference:
+| Method | Hit@1 | Hit@3 | Hit@5 |
+|---|---|---|---|
+| Agentless LLM localization, Gemini | 12.3% | 12.3% | 12.3% |
+| Agentless LLM localization, GPT-4o (original Agentless run) | 46.7% | 51.3% | 51.3% |
+| GraphCodeBERT, not fine-tuned | 2.3% | 7.3% | 9.7% |
+| **GraphCodeBERT, fine-tuned (2 epochs)** | **19.3%** | **32.0%** | **40.0%** |
+
+After two epochs of fine-tuning, the 125M-parameter retriever beat the Gemini-driven pipeline at every cutoff, and its Hit@5 came within about 11 points of the stronger LLM baseline. Embedding the functions is a one-time cost, and ranking a new issue against them takes a single embedding pass with no API calls.
+
+## Running it
+
+```sh
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+1. **Model:** download the [fine-tuned model](https://drive.google.com/file/d/1B9X52hsL7xnTmj-Ale8w2pCVWGxjDUhR/view?usp=sharing) and unzip it in the repository root. Without it, the base GraphCodeBERT is used, which is faster to try but much less accurate.
+2. **Localization results to rank:** download Agentless's [pre-generated SWE-bench Lite run](https://github.com/OpenAutoCoder/Agentless/releases/download/v1.5.0/agentless_swebench_lite.zip).
+3. **Score:** in `run_semantic_scoring_alone.sh`, set `in_dir` to the folder containing `file_level/`, `file_level_combined/`, and so on. Then run it. Embeddings are written to `embeddings/`, and the rankings to `out_dir/out_file`.
+
+To score the whole dataset, use the "all instances" section of that script. Pointing `PROJECT_FILE_LOC` at a local copy of the [SWE-bench Lite repositories](https://drive.usercontent.google.com/download?id=15-4XjTmY48ystrsc_xcvtOkMs3Fx8RoW&export=download&authuser=0&confirm=t&uuid=927974f7-294c-45ab-b5ce-dd8dd816aba2&at=ALWLOp55XuTjV6RIYrtvNMwuAzhl%3A1763766440739) (3.5 GB) saves downloading them again.
+
+To regenerate the LLM localization yourself, set your API key and `RESULTS_FOLDER`, then run `full_workflow/localization_commands_with_semantic_scoring.sh`.
+
+## Built with
+
+Python, PyTorch, Hugging Face Transformers, sentence-transformers, scikit-learn, and the SWE-bench datasets.
+
+Originally a final project for CS 6640. It builds on [Agentless](https://github.com/OpenAutoCoder/Agentless) (MIT, © 2024 OpenAutoCoder), whose original README is below.
+
+<details>
+<summary>Original Agentless README</summary>
+
 # 😺 Agentless
 
 <p align="center">
@@ -139,3 +152,5 @@ You can also checkout `classification/` folder to obtain our manual classificati
 * [SWE-bench](https://www.swebench.com/)
 * [Aider](https://github.com/paul-gauthier/aider)
 * [SWE-bench-docker](https://github.com/aorwall/SWE-bench-docker)
+
+</details>
